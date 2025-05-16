@@ -9,7 +9,6 @@
 use Friendica\Content\Text\BBCode;
 use Friendica\Content\Text\HTML;
 use Friendica\Core\Hook;
-use Friendica\Core\Logger;
 use Friendica\Core\Renderer;
 use Friendica\Database\DBA;
 use Friendica\DI;
@@ -108,8 +107,8 @@ function wppost_hook_fork(array &$b)
 	$post = $b['data'];
 
 	if (
-		$post['deleted'] || $post['private'] || ($post['created'] !== $post['edited']) ||
-		!strstr($post['postopts'] ?? '', 'wppost') || ($post['parent'] != $post['id'])
+		$post['deleted'] || ($post['private'] == Item::PRIVATE) || ($post['created'] !== $post['edited']) ||
+		!strstr($post['postopts'] ?? '', 'wppost') || ($post['gravity'] != Item::GRAVITY_PARENT)
 	) {
 		$b['execute'] = false;
 		return;
@@ -118,18 +117,12 @@ function wppost_hook_fork(array &$b)
 
 function wppost_post_local(array &$b)
 {
-
-	// This can probably be changed to allow editing by pointing to a different API endpoint
-
-	if ($b['edit']) {
-		return;
-	}
-
 	if (!DI::userSession()->getLocalUserId() || (DI::userSession()->getLocalUserId() != $b['uid'])) {
 		return;
 	}
 
-	if ($b['private'] || $b['parent']) {
+	// This can probably be changed to allow editing by pointing to a different API endpoint
+	if ($b['edit'] || ($b['private'] == Item::PRIVATE) || ($b['gravity'] != Item::GRAVITY_PARENT)) {
 		return;
 	}
 
@@ -152,12 +145,9 @@ function wppost_post_local(array &$b)
 	$b['postopts'] .= 'wppost';
 }
 
-
-
-
 function wppost_send(array &$b)
 {
-	if ($b['deleted'] || $b['private'] || ($b['created'] !== $b['edited'])) {
+	if ($b['deleted'] || ($b['private'] == Item::PRIVATE) || ($b['created'] !== $b['edited'])) {
 		return;
 	}
 
@@ -266,11 +256,13 @@ function wppost_send(array &$b)
 
 EOT;
 
-		Logger::debug('wppost: data: ' . $xml);
+		DI::logger()->debug('wppost: data: ' . $xml);
+
+		$x = '';
 
 		if ($wp_blog !== 'test') {
 			$x = DI::httpClient()->post($wp_blog, $xml)->getBodyString();
 		}
-		Logger::info('posted to wordpress: ' . (($x) ? $x : ''));
+		DI::logger()->info('posted to wordpress: ' . $x);
 	}
 }

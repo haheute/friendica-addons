@@ -6,22 +6,19 @@
  * Author: Matthew Exon <http://mat.exon.name>
  */
 
-use Friendica\App;
 use Friendica\Content\Text\BBCode;
 use Friendica\Core\Hook;
-use Friendica\Core\Logger;
 use Friendica\Core\Renderer;
 use Friendica\Core\System;
 use Friendica\Core\Worker;
 use Friendica\Database\DBA;
 use Friendica\DI;
 use Friendica\Model\Contact;
-use Friendica\Model\Item;
 use Friendica\Model\Post;
 use Friendica\Model\User;
 use Friendica\Network\HTTPClient\Client\HttpClientAccept;
+use Friendica\Network\HTTPClient\Client\HttpClientOptions;
 use Friendica\Protocol\Activity;
-use Friendica\Util\DateTimeFormat;
 
 /**
  * Sets up the addon hooks and the database table
@@ -34,26 +31,7 @@ function mailstream_install()
 	Hook::register('post_remote_end', 'addon/mailstream/mailstream.php', 'mailstream_post_hook');
 	Hook::register('mailstream_send_hook', 'addon/mailstream/mailstream.php', 'mailstream_send_hook');
 
-	Logger::info("mailstream: installed");
-}
-
-/**
- * Enforces that mailstream_install has set up the current version
- */
-function mailstream_check_version()
-{
-	if (!is_null(DI::config()->get('mailstream', 'dbversion'))) {
-		DI::config()->delete('mailstream', 'dbversion');
-		Logger::info("mailstream_check_version: old version detected, reinstalling");
-		mailstream_install();
-		Hook::loadHooks();
-		Hook::add(
-			'mailstream_convert_table_entries',
-			'addon/mailstream/mailstream.php',
-			'mailstream_convert_table_entries'
-		);
-		Hook::fork(Worker::PRIORITY_LOW, 'mailstream_convert_table_entries');
-	}
+	DI::logger()->info("installed mailstream");
 }
 
 /**
@@ -72,10 +50,12 @@ function mailstream_addon_admin(string &$o)
 {
 	$frommail = DI::config()->get('mailstream', 'frommail');
 	$template = Renderer::getMarkupTemplate('admin.tpl', 'addon/mailstream/');
-	$config = ['frommail',
+	$config = [
+		'frommail',
 		DI::l10n()->t('From Address'),
 		$frommail,
-		DI::l10n()->t('Email address that stream items will appear to be from.')];
+		DI::l10n()->t('Email address that stream items will appear to be from.')
+	];
 	$o .= Renderer::replaceMacros($template, [
 		'$frommail' => $config,
 		'$submit' => DI::l10n()->t('Save Settings')
@@ -105,7 +85,7 @@ function mailstream_generate_id(string $uri): string
 	$host = DI::baseUrl()->getHost();
 	$resource = hash('md5', $uri);
 	$message_id = "<" . $resource . "@" . $host . ">";
-	Logger::debug('mailstream: Generated message ID ' . $message_id . ' for URI ' . $uri);
+	DI::logger()->debug('generated message ID', ['id' => $message_id, 'uri' => $uri]);
 	return $message_id;
 }
 
@@ -114,20 +94,20 @@ function mailstream_send_hook(array $data)
 	$criteria = array('uid' => $data['uid'], 'contact-id' => $data['contact-id'], 'uri' => $data['uri']);
 	$item = Post::selectFirst([], $criteria);
 	if (empty($item)) {
-		Logger::error('mailstream_send_hook could not find item');
+		DI::logger()->error('could not find item');
 		return;
 	}
 
 	$user = User::getById($item['uid']);
 	if (empty($user)) {
-			Logger::error('mailstream_send_hook could not fund user', ['uid' => $item['uid']]);
+		DI::logger()->error('could not find user', ['uid' => $item['uid']]);
 		return;
 	}
 
 	if (!mailstream_send($data['message_id'], $item, $user)) {
-		Logger::debug('mailstream_send_hook send failed, will retry', $data);
+		DI::logger()->debug('send failed, will retry', $data);
 		if (!Worker::defer()) {
-			Logger::error('mailstream_send_hook failed and could not defer', $data);
+			DI::logger()->error('failed and could not defer', $data);
 		}
 	}
 }
@@ -142,31 +122,33 @@ function mailstream_send_hook(array $data)
  */
 function mailstream_post_hook(array &$item)
 {
-	mailstream_check_version();
-
-	if (!DI::pConfig()->get($item['uid'], 'mailstream', 'enabled')) {
-		Logger::debug('mailstream: not enabled.', ['item' => $item['id'], ' uid ' => $item['uid']]);
+	if ($item['uid'] === 0) {
+		DI::logger()->debug('mailstream: root user, skipping item ' . $item['id']);
 		return;
 	}
-	if (!$item['uid']) {
-		Logger::debug('mailstream: no uid for item ' . $item['id']);
+	if (!DI::pConfig()->get($item['uid'], 'mailstream', 'enabled')) {
+		DI::logger()->debug('mailstream: not enabled.', ['item' => $item['id'], ' uid ' => $item['uid']]);
 		return;
 	}
 	if (!$item['contact-id']) {
-		Logger::debug('mailstream: no contact-id for item ' . $item['id']);
+		DI::logger()->debug('no contact-id', ['item' => $item['id']]);
 		return;
 	}
 	if (!$item['uri']) {
-		Logger::debug('mailstream: no uri for item ' . $item['id']);
+		DI::logger()->debug('no uri', ['item' => $item['id']]);
 		return;
 	}
 	if ($item['verb'] == Activity::ANNOUNCE) {
-		Logger::debug('mailstream: announce item ', ['item' => $item['id']]);
+		DI::logger()->debug('ignoring announce', ['item' => $item['id']]);
 		return;
 	}
 	if (DI::pConfig()->get($item['uid'], 'mailstream', 'nolikes')) {
 		if ($item['verb'] == Activity::LIKE) {
-			Logger::debug('mailstream: like item ' . $item['id']);
+			DI::logger()->debug('ignoring like', ['item' => $item['id']]);
+			return;
+		}
+		if ($item['verb'] == Activity::DISLIKE) {
+			DI::logger()->debug('ignoring dislike', ['item' => $item['id']]);
 			return;
 		}
 	}
@@ -197,7 +179,7 @@ function mailstream_post_hook(array &$item)
 function mailstream_do_images(array &$item, array &$attachments)
 {
 	if (!DI::pConfig()->get($item['uid'], 'mailstream', 'attachimg')) {
-		return;
+		return $attachments;
 	}
 
 	$attachments = [];
@@ -215,9 +197,17 @@ function mailstream_do_images(array &$item, array &$attachments)
 
 		$cookiejar = tempnam(System::getTempPath(), 'cookiejar-mailstream-');
 		try {
-			$curlResult = DI::httpClient()->fetchFull($url, HttpClientAccept::DEFAULT, 0, $cookiejar);
+			$curlResult = DI::httpClient()->get($url, HttpClientAccept::DEFAULT, [HttpClientOptions::COOKIEJAR => $cookiejar]);
+			if (!$curlResult->isSuccess()) {
+				DI::logger()->debug('mailstream: fetch image url failed', [
+					'url' => $url,
+					'item_id' => $item['id'],
+					'return_code' => $curlResult->getReturnCode()
+				]);
+				continue;
+			}
 		} catch (InvalidArgumentException $e) {
-			Logger::error('mailstream_do_images exception fetching url', ['url' => $url, 'item_id' => $item['id']]);
+			DI::logger()->error('exception fetching url', ['url' => $url, 'item_id' => $item['id']]);
 			continue;
 		}
 		$attachments[$url] = [
@@ -318,13 +308,12 @@ function mailstream_subject(array $item): string
 	}
 	$contact = Contact::selectFirst([], ['id' => $item['contact-id'], 'uid' => $item['uid']]);
 	if (!DBA::isResult($contact)) {
-		Logger::error(
-			'mailstream_subject no contact for item',
-			['id' => $item['id'],
-				'plink' => $item['plink'],
-				'contact id' => $item['contact-id'],
-			'uid' => $item['uid']]
-		);
+		DI::logger()->error('no contact', [
+			'item' => $item['id'],
+			'plink' => $item['plink'],
+			'contact id' => $item['contact-id'],
+			'uid' => $item['uid']
+		]);
 		return DI::l10n()->t("Friendica post");
 	}
 	if ($contact['network'] === 'dfrn') {
@@ -361,21 +350,20 @@ function mailstream_subject(array $item): string
 function mailstream_send(string $message_id, array $item, array $user): bool
 {
 	if (!is_array($item)) {
-		Logger::error('mailstream_send item is empty', ['message_id' => $message_id]);
+		DI::logger()->error('item is empty', ['message_id' => $message_id]);
 		return false;
 	}
 
 	if (!$item['visible']) {
-		Logger::debug('mailstream_send item not yet visible', ['item uri' => $item['uri']]);
+		DI::logger()->debug('item not yet visible', ['item uri' => $item['uri']]);
 		return false;
 	}
 	if (!$message_id) {
-		Logger::error('mailstream_send no message ID supplied', ['item uri' => $item['uri'],
-				'user email' => $user['email']]);
+		DI::logger()->error('no message ID supplied', ['item uri' => $item['uri'], 'user email' => $user['email']]);
 		return true;
 	}
 
-	require_once (dirname(__file__) . '/phpmailer/class.phpmailer.php');
+	require_once(dirname(__file__) . '/phpmailer/class.phpmailer.php');
 
 	$item['body'] = Post\Media::addAttachmentsToBody($item['uri-id'], $item['body']);
 
@@ -389,7 +377,7 @@ function mailstream_send(string $message_id, array $item, array $user): bool
 	if (!$address) {
 		$address = $user['email'];
 	}
-	$mail = new PHPmailer();
+	$mail = new PHPMailer();
 	try {
 		$mail->XMailer = 'Friendica Mailstream Addon';
 		$mail->SetFrom($frommail, mailstream_sender($item));
@@ -420,21 +408,24 @@ function mailstream_send(string $message_id, array $item, array $user): bool
 		$item['body'] = BBCode::convertForUriId($item['uri-id'], $item['body'], BBCode::CONNECTORS);
 		$item['url'] = DI::baseUrl() . '/display/' . $item['guid'];
 		$mail->Body = Renderer::replaceMacros($template, [
-						 '$upstream' => DI::l10n()->t('Upstream'),
-						 '$uri' => DI::l10n()->t('URI'),
-						 '$local' => DI::l10n()->t('Local'),
-						 '$item' => $item]);
+			'$upstream' => DI::l10n()->t('Upstream'),
+			'$uri' => DI::l10n()->t('URI'),
+			'$local' => DI::l10n()->t('Local'),
+			'$item' => $item
+		]);
 		$mail->Body = mailstream_html_wrap($mail->Body);
 		if (!$mail->Send()) {
 			throw new Exception($mail->ErrorInfo);
 		}
-		Logger::debug('mailstream_send sent message', ['message ID' => $mail->MessageID,
-				'subject' => $mail->Subject,
-				'address' => $address]);
+		DI::logger()->debug('sent message', [
+			'message ID' => $mail->MessageID,
+			'subject' => $mail->Subject,
+			'address' => $address
+		]);
 	} catch (phpmailerException $e) {
-		Logger::debug('mailstream_send PHPMailer exception sending message ' . $message_id . ': ' . $e->errorMessage());
+		DI::logger()->debug('PHPMailer exception sending message', ['id' => $message_id, 'error' => $e->errorMessage()]);
 	} catch (Exception $e) {
-		Logger::debug('mailstream_send exception sending message ' . $message_id . ': ' . $e->getMessage());
+		DI::logger()->debug('exception sending message', ['id' => $message_id, 'error' => $e->getMessage()]);
 	}
 
 	return true;
@@ -456,29 +447,6 @@ function mailstream_html_wrap(string &$text)
 	}
 	$text = implode($lines);
 	return $text;
-}
-
-/**
- * Convert v1 mailstream table entries to v2 workerqueue items
- */
-function mailstream_convert_table_entries()
-{
-	$ms_item_ids = DBA::selectToArray('mailstream_item', [], ['message-id', 'uri', 'uid', 'contact-id'], ["`mailstream_item`.`completed` IS NULL"]);
-	Logger::debug('mailstream_convert_table_entries processing ' . count($ms_item_ids) . ' items');
-	foreach ($ms_item_ids as $ms_item_id) {
-		$send_hook_data = array('uid' => $ms_item_id['uid'],
-					'contact-id' => $ms_item_id['contact-id'],
-					'uri' => $ms_item_id['uri'],
-					'message_id' => $ms_item_id['message-id'],
-					'tries' => 0);
-		if (!$ms_item_id['message-id'] || !strlen($ms_item_id['message-id'])) {
-			Logger::info('mailstream_convert_table_entries: item has no message-id.', ['item' => $ms_item_id['id'], 'uri' => $ms_item_id['uri']]);
-							continue;
-		}
-		Logger::info('mailstream_convert_table_entries: convert item to workerqueue', $send_hook_data);
-		Hook::fork(Worker::PRIORITY_LOW, 'mailstream_send_hook', $send_hook_data);
-	}
-	DBA::e('DROP TABLE `mailstream_item`');
 }
 
 /**

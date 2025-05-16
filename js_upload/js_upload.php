@@ -7,11 +7,10 @@
  * Maintainer: Hypolite Petovan <https://friendica.mrpetovan.com/profile/hypolite>
  */
 
-use Friendica\App;
 use Friendica\Core\Hook;
-use Friendica\Core\Logger;
 use Friendica\Core\Renderer;
 use Friendica\DI;
+use Friendica\Util\Images;
 use Friendica\Util\Strings;
 
 global $js_upload_jsonresponse;
@@ -20,9 +19,9 @@ global $js_upload_result;
 function js_upload_install()
 {
 	Hook::register('photo_upload_form', __FILE__, 'js_upload_form');
-	Hook::register('photo_post_init', __FILE__, 'js_upload_post_init');
-	Hook::register('photo_post_file', __FILE__, 'js_upload_post_file');
-	Hook::register('photo_post_end', __FILE__, 'js_upload_post_end');
+	Hook::register('photo_post_init',   __FILE__, 'js_upload_post_init');
+	Hook::register('photo_post_file',   __FILE__, 'js_upload_post_file');
+	Hook::register('photo_post_end',    __FILE__, 'js_upload_post_end');
 }
 
 function js_upload_form(array &$b)
@@ -34,11 +33,11 @@ function js_upload_form(array &$b)
 
 	$tpl = Renderer::getMarkupTemplate('js_upload.tpl', 'addon/js_upload');
 	$b['addon_text'] .= Renderer::replaceMacros($tpl, [
-		'$upload_msg' => DI::l10n()->t('Select files for upload'),
-		'$drop_msg' => DI::l10n()->t('Drop files here to upload'),
-		'$cancel' => DI::l10n()->t('Cancel'),
-		'$failed' => DI::l10n()->t('Failed'),
-		'$post_url' => $b['post_url'],
+		'$upload_msg'   => DI::l10n()->t('Select files for upload'),
+		'$drop_msg'     => DI::l10n()->t('Drop files here to upload'),
+		'$cancel'       => DI::l10n()->t('Cancel'),
+		'$failed'       => DI::l10n()->t('Failed'),
+		'$post_url'     => $b['post_url'],
 		'$maximagesize' => Strings::getBytesFromShorthand(DI::config()->get('system', 'maximagesize')),
 	]);
 }
@@ -48,12 +47,19 @@ function js_upload_post_init(array &$b)
 	global $js_upload_result, $js_upload_jsonresponse;
 
 	// list of valid extensions
-	$allowedExtensions = ['jpeg', 'gif', 'png', 'jpg'];
+	$allowedExtensions = [];
+	foreach (Images::IMAGETYPES as $type) {
+		$extension = image_type_to_extension($type, false);
+		if ($extension == 'jpeg') {
+			$allowedExtensions[] = 'jpg';
+		}
+		$allowedExtensions[] = $extension;
+	}
 
 	// max file size in bytes
 	$sizeLimit = Strings::getBytesFromShorthand(DI::config()->get('system', 'maximagesize'));
 
-	$uploader = new qqFileUploader($allowedExtensions, $sizeLimit);
+	$uploader = new js_upload_qqFileUploader($allowedExtensions, $sizeLimit);
 
 	$result = $uploader->handleUpload();
 
@@ -61,7 +67,7 @@ function js_upload_post_init(array &$b)
 	$js_upload_jsonresponse = htmlspecialchars(json_encode($result), ENT_NOQUOTES);
 
 	if (isset($result['error'])) {
-		Logger::info('mod/photos.php: photos_post(): error uploading photo: ' . $result['error']);
+		DI::logger()->info('mod/photos.php: photos_post(): error uploading photo: ' . $result['error']);
 		echo json_encode($result);
 		exit();
 	}
@@ -75,17 +81,16 @@ function js_upload_post_file(array &$b)
 
 	$result = $js_upload_result;
 
-	$b['src'] = $result['path'];
+	$b['src']      = $result['path'];
 	$b['filename'] = $result['filename'];
 	$b['filesize'] = filesize($b['src']);
-
 }
 
 function js_upload_post_end(int &$b)
 {
 	global $js_upload_jsonresponse;
 
-	Logger::notice('upload_post_end');
+	DI::logger()->notice('upload_post_end');
 	if (!empty($js_upload_jsonresponse)) {
 		echo $js_upload_jsonresponse;
 		exit();
@@ -95,7 +100,7 @@ function js_upload_post_end(int &$b)
 /**
  * Handle file uploads via XMLHttpRequest
  */
-class qqUploadedFileXhr
+class js_upload_qqUploadedFileXhr
 {
 	private $pathnm = '';
 
@@ -149,7 +154,7 @@ class qqUploadedFileXhr
 /**
  * Handle file uploads via regular form post (uses the $_FILES array)
  */
-class qqUploadedFileForm
+class js_upload_qqUploadedFileForm
 {
 	/**
 	 * Save the file to the specified path
@@ -177,13 +182,17 @@ class qqUploadedFileForm
 	}
 }
 
-class qqFileUploader
+class js_upload_qqFileUploader
 {
-	private $allowedExtensions = [];
-	private $sizeLimit = 10485760;
+	private $allowedExtensions;
+	private $sizeLimit;
+
+	/**
+	 * @var js_upload_qqUploadedFileXhr|js_upload_qqUploadedFileForm|false
+	 */
 	private $file;
 
-	function __construct(array $allowedExtensions = [], $sizeLimit = 10485760)
+	function __construct(array $allowedExtensions = [], $sizeLimit)
 	{
 		$allowedExtensions = array_map('strtolower', $allowedExtensions);
 
@@ -191,13 +200,12 @@ class qqFileUploader
 		$this->sizeLimit = $sizeLimit;
 
 		if (isset($_GET['qqfile'])) {
-			$this->file = new qqUploadedFileXhr();
+			$this->file = new js_upload_qqUploadedFileXhr();
 		} elseif (isset($_FILES['qqfile'])) {
-			$this->file = new qqUploadedFileForm();
+			$this->file = new js_upload_qqUploadedFileForm();
 		} else {
 			$this->file = false;
 		}
-
 	}
 
 	/**
@@ -215,11 +223,9 @@ class qqFileUploader
 			return ['error' => DI::l10n()->t('Uploaded file is empty')];
 		}
 
-//		if ($size > $this->sizeLimit) {
-
-//			return array('error' => DI::l10n()->t('Uploaded file is too large'));
-//		}
-
+		//		if ($size > $this->sizeLimit) {
+		//			return array('error' => DI::l10n()->t('Uploaded file is too large'));
+		//		}
 
 		$maximagesize = Strings::getBytesFromShorthand(DI::config()->get('system', 'maximagesize'));
 
@@ -231,7 +237,7 @@ class qqFileUploader
 		$filename = $pathinfo['filename'];
 
 		if (!isset($pathinfo['extension'])) {
-			Logger::warning('extension isn\'t set.', ['filename' => $filename]);
+			DI::logger()->warning('extension isn\'t set.', ['filename' => $filename]);
 		}
 		$ext = $pathinfo['extension'] ?? '';
 
@@ -241,14 +247,14 @@ class qqFileUploader
 
 		if ($this->file->save()) {
 			return [
-				'success' => true,
-				'path' => $this->file->getPath(),
+				'success'  => true,
+				'path'     => $this->file->getPath(),
 				'filename' => $filename . '.' . $ext
 			];
 		} else {
 			return [
-				'error' => DI::l10n()->t('Upload was cancelled, or server error encountered'),
-				'path' => $this->file->getPath(),
+				'error'    => DI::l10n()->t('Upload was cancelled, or server error encountered'),
+				'path'     => $this->file->getPath(),
 				'filename' => $filename . '.' . $ext
 			];
 		}

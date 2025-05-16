@@ -1,5 +1,4 @@
 <?php
-
 /*
  * Name: Mastodon Custom Emojis
  * Description: Replace emojis shortcodes in Mastodon posts with their originating server custom emojis images.
@@ -9,13 +8,11 @@
  * Status: Unsupported
  */
 
-use Friendica\App;
 use Friendica\Content\Smilies;
 use Friendica\Core\Cache\Enum\Duration;
 use Friendica\Core\Hook;
 use Friendica\Core\Protocol;
 use Friendica\DI;
-use Friendica\Util\Proxy as ProxyUtils;
 
 function mastodoncustomemojis_install()
 {
@@ -79,7 +76,7 @@ function mastodoncustomemojis_fetch_custom_emojis_for_url($api_base_url)
 
 	$api_url = $api_base_url . '/api/v1/custom_emojis';
 
-	$fetchResult = DI::httpClient()->fetchFull($api_url);
+	$fetchResult = DI::httpClient()->get($api_url);
 
 	if ($fetchResult->isSuccess()) {
 		$emojis_array = json_decode($fetchResult->getBodyString(), true);
@@ -88,7 +85,7 @@ function mastodoncustomemojis_fetch_custom_emojis_for_url($api_base_url)
 			foreach ($emojis_array as $emoji) {
 				if (!empty($emoji['shortcode']) && !empty($emoji['static_url'])) {
 					$return['texts'][] = ':' . $emoji['shortcode'] . ':';
-					$return['icons'][] = '<img class="emoji mastodon" src="' . ProxyUtils::proxifyUrl($emoji['static_url']) . '" alt=":' . $emoji['shortcode'] . ':" title=":' . $emoji['shortcode'] . ':"/>';
+					$return['icons'][] = '<img class="emoji mastodon" src="' . $emoji['static_url'] . '" alt=":' . $emoji['shortcode'] . ':" title=":' . $emoji['shortcode'] . ':"/>';
 				}
 			}
 		}

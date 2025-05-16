@@ -8,12 +8,11 @@
  * Author: Cat Gray <https://free-haven.org/profile/catness>
  */
 
-use Friendica\App;
 use Friendica\Content\Text\BBCode;
 use Friendica\Core\Hook;
-use Friendica\Core\Logger;
 use Friendica\Core\Renderer;
 use Friendica\DI;
+use Friendica\Model\Item;
 use Friendica\Model\Tag;
 use Friendica\Model\User;
 use Friendica\Util\DateTimeFormat;
@@ -85,17 +84,12 @@ function ijpost_settings_post(array &$b)
 
 function ijpost_post_local(array &$b)
 {
-	// This can probably be changed to allow editing by pointing to a different API endpoint
-
-	if ($b['edit']) {
-		return;
-	}
-
 	if (!DI::userSession()->getLocalUserId() || (DI::userSession()->getLocalUserId() != $b['uid'])) {
 		return;
 	}
 
-	if ($b['private'] || $b['parent']) {
+	// This can probably be changed to allow editing by pointing to a different API endpoint
+	if ($b['edit'] || ($b['private'] == Item::PRIVATE) || ($b['gravity'] != Item::GRAVITY_PARENT)) {
 		return;
 	}
 
@@ -120,7 +114,7 @@ function ijpost_post_local(array &$b)
 
 function ijpost_send(array &$b)
 {
-	if ($b['deleted'] || $b['private'] || ($b['created'] !== $b['edited'])) {
+	if ($b['deleted'] || ($b['private'] == Item::PRIVATE) || ($b['created'] !== $b['edited'])) {
 		return;
 	}
 
@@ -150,11 +144,11 @@ function ijpost_send(array &$b)
 		$tags = Tag::getCSVByURIId($b['uri-id'], [Tag::HASHTAG]);
 
 		$date = DateTimeFormat::convert($b['created'], $tz);
-		$year = intval(substr($date,0,4));
-		$mon  = intval(substr($date,5,2));
-		$day  = intval(substr($date,8,2));
-		$hour = intval(substr($date,11,2));
-		$min  = intval(substr($date,14,2));
+		$year = intval(substr($date, 0, 4));
+		$mon  = intval(substr($date, 5, 2));
+		$day  = intval(substr($date, 8, 2));
+		$hour = intval(substr($date, 11, 2));
+		$min  = intval(substr($date, 14, 2));
 
 		$xml = <<< EOT
 <?xml version="1.0" encoding="utf-8"?>
@@ -183,11 +177,11 @@ function ijpost_send(array &$b)
 
 EOT;
 
-		Logger::debug('ijpost: data: ' . $xml);
+		DI::logger()->debug('ijpost: data: ' . $xml);
 
 		if ($ij_blog !== 'test') {
 			$x = DI::httpClient()->post($ij_blog, $xml, ['Content-Type' => 'text/xml'])->getBodyString();
 		}
-		Logger::info('posted to insanejournal: ' . $x ? $x : '');
+		DI::logger()->info('posted to insanejournal: ' . $x ? $x : '');
 	}
 }

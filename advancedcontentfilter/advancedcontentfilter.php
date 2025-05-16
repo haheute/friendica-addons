@@ -33,16 +33,13 @@
  *
  */
 
-use Friendica\App;
 use Friendica\BaseModule;
 use Friendica\Content\Text\Markdown;
 use Friendica\Core\Hook;
-use Friendica\Core\Logger;
 use Friendica\Core\Renderer;
 use Friendica\Database\DBA;
 use Friendica\Database\DBStructure;
 use Friendica\DI;
-use Friendica\Model\Item;
 use Friendica\Model\Post;
 use Friendica\Model\Tag;
 use Friendica\Model\User;
@@ -64,7 +61,7 @@ function advancedcontentfilter_install()
 	Hook::add('dbstructure_definition'          , __FILE__, 'advancedcontentfilter_dbstructure_definition');
 	DBStructure::performUpdate();
 
-	Logger::notice('installed advancedcontentfilter');
+	DI::logger()->notice('installed advancedcontentfilter');
 }
 
 /*
@@ -190,11 +187,32 @@ function advancedcontentfilter_module() {}
 function advancedcontentfilter_init()
 {
 	if (DI::args()->getArgc() > 1 && DI::args()->getArgv()[1] == 'api') {
-		$slim = new \Slim\App();
+		$slim = \Slim\Factory\AppFactory::create();
 
-		require __DIR__ . '/src/middlewares.php';
+		/**
+		 * The routing middleware should be added before the ErrorMiddleware
+		 * Otherwise exceptions thrown from it will not be handled
+		 */
+		$slim->addRoutingMiddleware();
 
-		require __DIR__ . '/src/routes.php';
+		$slim->addErrorMiddleware(true, true, true, DI::logger());
+
+		// register routes
+		$slim->group('/advancedcontentfilter/api', function (\Slim\Routing\RouteCollectorProxy $app) {
+			$app->group('/rules', function (\Slim\Routing\RouteCollectorProxy $app) {
+				$app->get('', 'advancedcontentfilter_get_rules');
+				$app->post('', 'advancedcontentfilter_post_rules');
+
+				$app->get('/{id}', 'advancedcontentfilter_get_rules_id');
+				$app->put('/{id}', 'advancedcontentfilter_put_rules_id');
+				$app->delete('/{id}', 'advancedcontentfilter_delete_rules_id');
+			});
+
+			$app->group('/variables', function (\Slim\Routing\RouteCollectorProxy $app) {
+				$app->get('/{guid}', 'advancedcontentfilter_get_variables_guid');
+			});
+		});
+
 		$slim->run();
 
 		exit;
@@ -252,8 +270,8 @@ function advancedcontentfilter_content()
 				'rule_expression'   => DI::l10n()->t('Rule Expression'),
 				'cancel'            => DI::l10n()->t('Cancel'),
 			],
-			'$current_theme' => DI::app()->getCurrentTheme(),
-			'$rules' => advancedcontentfilter_get_rules(),
+			'$current_theme' => DI::appHelper()->getCurrentTheme(),
+			'$rules' => DBA::toArray(DBA::select('advancedcontentfilter_rules', [], ['uid' => DI::userSession()->getLocalUserId()])),
 			'$form_security_token' => BaseModule::getFormSecurityToken()
 		]);
 	}
@@ -305,7 +323,7 @@ function advancedcontentfilter_build_fields($data)
  * API
  */
 
-function advancedcontentfilter_get_rules()
+function advancedcontentfilter_get_rules(ServerRequestInterface $request, ResponseInterface $response): ResponseInterface
 {
 	if (!DI::userSession()->getLocalUserId()) {
 		throw new HTTPException\UnauthorizedException(DI::l10n()->t('You must be logged in to use this method'));
@@ -313,7 +331,8 @@ function advancedcontentfilter_get_rules()
 
 	$rules = DBA::toArray(DBA::select('advancedcontentfilter_rules', [], ['uid' => DI::userSession()->getLocalUserId()]));
 
-	return json_encode($rules);
+	$response->getBody()->write(json_encode($rules));
+	return $response->withHeader('Content-Type', 'application/json');
 }
 
 function advancedcontentfilter_get_rules_id(ServerRequestInterface $request, ResponseInterface $response, $args)
@@ -324,10 +343,11 @@ function advancedcontentfilter_get_rules_id(ServerRequestInterface $request, Res
 
 	$rule = DBA::selectFirst('advancedcontentfilter_rules', [], ['id' => $args['id'], 'uid' => DI::userSession()->getLocalUserId()]);
 
-	return json_encode($rule);
+	$response->getBody()->write(json_encode($rule));
+	return $response->withHeader('Content-Type', 'application/json');
 }
 
-function advancedcontentfilter_post_rules(ServerRequestInterface $request)
+function advancedcontentfilter_post_rules(ServerRequestInterface $request, ResponseInterface $response)
 {
 	if (!DI::userSession()->getLocalUserId()) {
 		throw new HTTPException\UnauthorizedException(DI::l10n()->t('You must be logged in to use this method'));
@@ -360,7 +380,8 @@ function advancedcontentfilter_post_rules(ServerRequestInterface $request)
 
 	DI::cache()->delete('rules_' . DI::userSession()->getLocalUserId());
 
-	return json_encode(['message' => DI::l10n()->t('Rule successfully added'), 'rule' => $rule]);
+	$response->getBody()->write(json_encode(['message' => DI::l10n()->t('Rule successfully added'), 'rule' => $rule]));
+	return $response->withHeader('Content-Type', 'application/json');
 }
 
 function advancedcontentfilter_put_rules_id(ServerRequestInterface $request, ResponseInterface $response, $args)
@@ -391,7 +412,8 @@ function advancedcontentfilter_put_rules_id(ServerRequestInterface $request, Res
 
 	DI::cache()->delete('rules_' . DI::userSession()->getLocalUserId());
 
-	return json_encode(['message' => DI::l10n()->t('Rule successfully updated')]);
+	$response->getBody()->write(json_encode(['message' => DI::l10n()->t('Rule successfully updated')]));
+	return $response->withHeader('Content-Type', 'application/json');
 }
 
 function advancedcontentfilter_delete_rules_id(ServerRequestInterface $request, ResponseInterface $response, $args)
@@ -414,7 +436,8 @@ function advancedcontentfilter_delete_rules_id(ServerRequestInterface $request, 
 
 	DI::cache()->delete('rules_' . DI::userSession()->getLocalUserId());
 
-	return json_encode(['message' => DI::l10n()->t('Rule successfully deleted')]);
+	$response->getBody()->write(json_encode(['message' => DI::l10n()->t('Rule successfully deleted')]));
+	return $response->withHeader('Content-Type', 'application/json');
 }
 
 function advancedcontentfilter_get_variables_guid(ServerRequestInterface $request, ResponseInterface $response, $args)
@@ -437,7 +460,8 @@ function advancedcontentfilter_get_variables_guid(ServerRequestInterface $reques
 
 	$return = advancedcontentfilter_get_filter_fields(advancedcontentfilter_prepare_item_row($item_row));
 
-	return json_encode(['variables' => str_replace('\\\'', '\'', var_export($return, true))]);
+	$response->getBody()->write(json_encode(['variables' => str_replace('\\\'', '\'', var_export($return, true))]));
+	return $response->withHeader('Content-Type', 'application/json');
 }
 
 /**

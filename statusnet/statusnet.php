@@ -38,10 +38,8 @@ define('STATUSNET_DEFAULT_POLL_INTERVAL', 5); // given in minutes
 require_once __DIR__ . DIRECTORY_SEPARATOR . 'library' . DIRECTORY_SEPARATOR . 'statusnetoauth.php';
 
 use CodebirdSN\CodebirdSN;
-use Friendica\App;
 use Friendica\Content\Text\Plaintext;
 use Friendica\Core\Hook;
-use Friendica\Core\Logger;
 use Friendica\Core\Renderer;
 use Friendica\Core\System;
 use Friendica\Database\DBA;
@@ -59,7 +57,7 @@ function statusnet_install()
 	Hook::register('hook_fork', 'addon/statusnet/statusnet.php', 'statusnet_hook_fork');
 	Hook::register('post_local', 'addon/statusnet/statusnet.php', 'statusnet_post_local');
 	Hook::register('jot_networks', 'addon/statusnet/statusnet.php', 'statusnet_jot_nets');
-	Logger::notice('installed GNU Social');
+	DI::logger()->notice('installed GNU Social');
 }
 
 function statusnet_jot_nets(array &$jotnets_fields)
@@ -296,7 +294,7 @@ function statusnet_hook_fork(array &$b)
 
 	$post = $b['data'];
 
-	if ($post['deleted'] || ($post['created'] !== $post['edited']) || strpos($post['postopts'] ?? '', 'statusnet') === false || ($post['parent'] != $post['id']) || $post['private']) {
+	if ($post['deleted'] || ($post['created'] !== $post['edited']) || strpos($post['postopts'] ?? '', 'statusnet') === false || ($post['gravity'] != Item::GRAVITY_PARENT) || ($post['private'] == Item::PRIVATE)) {
 		$b['execute'] = false;
 		return;
 	}
@@ -336,7 +334,7 @@ function statusnet_post_hook(array &$b)
 	/**
 	 * Post to GNU Social
 	 */
-	if ($b['deleted'] || $b['private'] || ($b['created'] !== $b['edited'])) {
+	if ($b['deleted'] || ($b['private'] == Item::PRIVATE) || ($b['created'] !== $b['edited'])) {
 		return;
 	}
 
@@ -356,7 +354,7 @@ function statusnet_post_hook(array &$b)
 		return;
 	}
 
-	Logger::notice('GNU Socialpost invoked');
+	DI::logger()->notice('GNU Socialpost invoked');
 
 	DI::pConfig()->load($b['uid'], 'statusnet');
 
@@ -365,6 +363,8 @@ function statusnet_post_hook(array &$b)
 	$csecret = DI::pConfig()->get($b['uid'], 'statusnet', 'consumersecret');
 	$otoken  = DI::pConfig()->get($b['uid'], 'statusnet', 'oauthtoken');
 	$osecret = DI::pConfig()->get($b['uid'], 'statusnet', 'oauthsecret');
+
+	$iscomment = null;
 
 	if ($ckey && $csecret && $otoken && $osecret) {
 		$dent = new StatusNetOAuth($api, $ckey, $csecret, $otoken, $osecret);
@@ -406,7 +406,7 @@ function statusnet_post_hook(array &$b)
 			$cb->setToken($otoken, $osecret);
 			$result = $cb->statuses_update($postdata);
 			//$result = $dent->post('statuses/update', $postdata);
-			Logger::info('statusnet_post send, result: ' . print_r($result, true) .
+			DI::logger()->info('statusnet_post send, result: ' . print_r($result, true) .
 				"\nmessage: " . $msg . "\nOriginal post: " . print_r($b, true) . "\nPost Data: " . print_r($postdata, true));
 
 			if (!empty($result->source)) {
@@ -414,9 +414,9 @@ function statusnet_post_hook(array &$b)
 			}
 
 			if (!empty($result->error)) {
-				Logger::notice('Send to GNU Social failed: "' . $result->error . '"');
+				DI::logger()->notice('Send to GNU Social failed: "' . $result->error . '"');
 			} elseif ($iscomment) {
-				Logger::notice('statusnet_post: Update extid ' . $result->id . ' for post id ' . $b['id']);
+				DI::logger()->notice('statusnet_post: Update extid ' . $result->id . ' for post id ' . $b['id']);
 				Item::update(['extid' => $hostname . '::' . $result->id, 'body' => $result->text], ['id' => $b['id']]);
 			}
 		}
@@ -439,11 +439,13 @@ function statusnet_addon_admin_post()
 		$secret = trim($_POST['secret'][$id]);
 		$key = trim($_POST['key'][$id]);
 		//$applicationname = (!empty($_POST['applicationname']) ? Strings::escapeTags(trim($_POST['applicationname'][$id])):'');
-		if ($sitename != '' &&
+		if (
+			$sitename != '' &&
 			$apiurl != '' &&
 			$secret != '' &&
 			$key != '' &&
-			empty($_POST['delete'][$id])) {
+			empty($_POST['delete'][$id])
+		) {
 
 			$sites[] = [
 				'sitename' => $sitename,

@@ -14,7 +14,6 @@ use Friendica\Content\Text\NPF;
 use Friendica\Core\Cache\Enum\Duration;
 use Friendica\Core\Config\Util\ConfigFileManager;
 use Friendica\Core\Hook;
-use Friendica\Core\Logger;
 use Friendica\Core\Protocol;
 use Friendica\Core\Renderer;
 use Friendica\Core\System;
@@ -22,6 +21,7 @@ use Friendica\Core\Worker;
 use Friendica\Database\DBA;
 use Friendica\DI;
 use Friendica\Model\Contact;
+use Friendica\Model\Conversation;
 use Friendica\Model\Item;
 use Friendica\Model\Photo;
 use Friendica\Model\Post;
@@ -31,7 +31,6 @@ use Friendica\Network\HTTPClient\Client\HttpClientAccept;
 use Friendica\Network\HTTPClient\Client\HttpClientOptions;
 use Friendica\Protocol\Activity;
 use Friendica\Util\DateTimeFormat;
-use Friendica\Util\Network;
 use Friendica\Util\Strings;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
@@ -60,12 +59,12 @@ function tumblr_install()
 	Hook::register('check_item_notification', __FILE__, 'tumblr_check_item_notification');
 	Hook::register('probe_detect',            __FILE__, 'tumblr_probe_detect');
 	Hook::register('item_by_link',            __FILE__, 'tumblr_item_by_link');
-	Logger::info('installed tumblr');
+	DI::logger()->info('installed tumblr');
 }
 
 function tumblr_load_config(ConfigFileManager $loader)
 {
-	DI::app()->getConfigCache()->load($loader->loadAddonConfig('tumblr'), \Friendica\Core\Config\ValueObject\Cache::SOURCE_STATIC);
+	DI::appHelper()->getConfigCache()->load($loader->loadAddonConfig('tumblr'), \Friendica\Core\Config\ValueObject\Cache::SOURCE_STATIC);
 }
 
 function tumblr_check_item_notification(array &$notification_data)
@@ -121,18 +120,19 @@ function tumblr_item_by_link(array &$hookData)
 		return;
 	}
 
-	Logger::debug('Found tumblr post', ['url' => $hookData['uri'], 'blog' => $matches[1], 'id' => $matches[2]]);
+	DI::logger()->debug('Found tumblr post', ['url' => $hookData['uri'], 'blog' => $matches[1], 'id' => $matches[2]]);
 
 	$parameters = ['id' => $matches[2], 'reblog_info' => false, 'notes_info' => false, 'npf' => false];
 	$result = tumblr_get($hookData['uid'], 'blog/' . $matches[1] . '/posts', $parameters);
 	if ($result->meta->status > 399) {
-		Logger::notice('Error fetching status', ['meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'blog' => $matches[1], 'id' => $matches[2]]);
+		DI::logger()->notice('Error fetching status', ['meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'blog' => $matches[1], 'id' => $matches[2]]);
 		return [];
 	}
 
-	Logger::debug('Got post', ['blog' => $matches[1], 'id' => $matches[2], 'result' => $result->response->posts]);
+	DI::logger()->debug('Got post', ['blog' => $matches[1], 'id' => $matches[2], 'result' => $result->response->posts]);
 	if (!empty($result->response->posts)) {
 		$hookData['item_id'] = tumblr_process_post($result->response->posts[0], $hookData['uid'], Item::PR_FETCHED);
+		Item::incrementInbound(Protocol::TUMBLR);
 	}
 }
 
@@ -158,20 +158,20 @@ function tumblr_follow(array &$hook_data)
 		return;
 	}
 
-	Logger::debug('Check if contact is Tumblr', ['url' => $hook_data['url']]);
+	DI::logger()->debug('Check if contact is Tumblr', ['url' => $hook_data['url']]);
 
 	$fields = tumblr_get_contact_by_url($hook_data['url'], $uid);
 	if (empty($fields)) {
-		Logger::debug('Contact is not a Tumblr contact', ['url' => $hook_data['url']]);
+		DI::logger()->debug('Contact is not a Tumblr contact', ['url' => $hook_data['url']]);
 		return;
 	}
 
 	$result = tumblr_post($uid, 'user/follow', ['url' => $fields['url']]);
 	if ($result->meta->status <= 399) {
 		$hook_data['contact'] = $fields;
-		Logger::debug('Successfully start following', ['url' => $fields['url']]);
+		DI::logger()->debug('Successfully start following', ['url' => $fields['url']]);
 	} else {
-		Logger::notice('Following failed', ['meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'url' => $fields['url']]);
+		DI::logger()->notice('Following failed', ['meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'url' => $fields['url']]);
 	}
 }
 
@@ -203,9 +203,9 @@ function tumblr_block(array &$hook_data)
 	$hook_data['result'] = ($result->meta->status <= 399);
 
 	if ($hook_data['result']) {
-		$cdata = Contact::getPublicAndUserContactID($hook_data['contact']['id'], $hook_data['uid']);
-		if (!empty($cdata['user'])) {
-			Contact::remove($cdata['user']);
+		$ucid = Contact::getUserContactId($hook_data['contact']['id'], $hook_data['uid']);
+		if ($ucid) {
+			Contact::remove($ucid);
 		}
 	}
 }
@@ -238,9 +238,7 @@ function tumblr_get_contact_uuid(array $contact): string
  * existence of this method is checked to figure out if the addon offers a
  * module.
  */
-function tumblr_module()
-{
-}
+function tumblr_module() {}
 
 function tumblr_content()
 {
@@ -393,12 +391,17 @@ function tumblr_settings_post(array &$b)
 		DI::pConfig()->set(DI::userSession()->getLocalUserId(), 'tumblr', 'import',          intval($_POST['tumblr_import']));
 
 		$max_tags = DI::config()->get('tumblr', 'max_tags') ?? TUMBLR_DEFAULT_MAXIMUM_TAGS;
-		$tags     = [];
-		foreach (explode(',', $_POST['tags']) as $tag) {
-			if (count($tags) < $max_tags) {
-				$tags[] = trim($tag, ' #');
-			}
-		}
+
+		$tags = array_slice(
+			array_filter(
+				array_map(
+					function($tag) { return trim($tag, ' #');},
+					explode(',', $_POST['tags']) ?: []
+				)
+			),
+			0,
+			$max_tags,
+		);
 
 		DI::pConfig()->set(DI::userSession()->getLocalUserId(), 'tumblr', 'tags', $tags);
 	}
@@ -416,11 +419,11 @@ function tumblr_cron()
 	if ($last) {
 		$next = $last + ($poll_interval * 60);
 		if ($next > time()) {
-			Logger::notice('poll interval not reached');
+			DI::logger()->notice('poll interval not reached');
 			return;
 		}
 	}
-	Logger::notice('cron_start');
+	DI::logger()->notice('cron_start');
 
 	$abandon_days = intval(DI::config()->get('system', 'account_abandon_days'));
 	if ($abandon_days < 1) {
@@ -433,30 +436,30 @@ function tumblr_cron()
 	foreach ($pconfigs as $pconfig) {
 		if ($abandon_days != 0) {
 			if (!DBA::exists('user', ["`uid` = ? AND `login_date` >= ?", $pconfig['uid'], $abandon_limit])) {
-				Logger::notice('abandoned account: timeline from user will not be imported', ['user' => $pconfig['uid']]);
+				DI::logger()->notice('abandoned account: timeline from user will not be imported', ['user' => $pconfig['uid']]);
 				continue;
 			}
 		}
 
-		Logger::notice('importing timeline - start', ['user' => $pconfig['uid']]);
+		DI::logger()->notice('importing timeline - start', ['user' => $pconfig['uid']]);
 		tumblr_fetch_dashboard($pconfig['uid'], $last);
 		tumblr_fetch_tags($pconfig['uid'], $last);
-		Logger::notice('importing timeline - done', ['user' => $pconfig['uid']]);
+		DI::logger()->notice('importing timeline - done', ['user' => $pconfig['uid']]);
 	}
 
 	$last_clean = DI::keyValue()->get('tumblr_last_clean');
 	if (empty($last_clean) || ($last_clean + 86400 < time())) {
-		Logger::notice('Start contact cleanup');
+		DI::logger()->notice('Start contact cleanup');
 		$contacts = DBA::select('account-user-view', ['id', 'pid'], ["`network` = ? AND `uid` != ? AND `rel` = ?", Protocol::TUMBLR, 0, Contact::NOTHING]);
 		while ($contact = DBA::fetch($contacts)) {
 			Worker::add(Worker::PRIORITY_LOW, 'MergeContact', $contact['pid'], $contact['id'], 0);
 		}
 		DBA::close($contacts);
 		DI::keyValue()->set('tumblr_last_clean', time());
-		Logger::notice('Contact cleanup done');
+		DI::logger()->notice('Contact cleanup done');
 	}
 
-	Logger::notice('cron_end');
+	DI::logger()->notice('cron_end');
 
 	DI::keyValue()->set('tumblr_last_poll', time());
 }
@@ -478,13 +481,13 @@ function tumblr_hook_fork(array &$b)
 
 	if (DI::pConfig()->get($post['uid'], 'tumblr', 'import')) {
 		// Don't post if it isn't a reply to a tumblr post
-		if (($post['parent'] != $post['id']) && !Post::exists(['id' => $post['parent'], 'network' => Protocol::TUMBLR])) {
-			Logger::notice('No tumblr parent found', ['item' => $post['id']]);
+		if (($post['gravity'] != Item::GRAVITY_PARENT) && !Post::exists(['id' => $post['parent'], 'network' => Protocol::TUMBLR])) {
+			DI::logger()->notice('No tumblr parent found', ['item' => $post['id']]);
 			$b['execute'] = false;
 			return;
 		}
-	} elseif (!strstr($post['postopts'] ?? '', 'tumblr') || ($post['parent'] != $post['id']) || $post['private']) {
-		DI::logger()->info('Activities are never exported when we don\'t import the tumblr timeline', ['uid' => $post['uid']]);
+	} elseif (!strstr($post['postopts'] ?? '', 'tumblr') || ($post['gravity'] != Item::GRAVITY_PARENT) || ($post['private'] == Item::PRIVATE)) {
+		DI::logger()->info('Post will not be exported', ['uid' => $post['uid'], 'postopts' => $post['postopts'], 'gravity' => $post['gravity'], 'private' => $post['private']]);
 		$b['execute'] = false;
 		return;
 	}
@@ -492,15 +495,11 @@ function tumblr_hook_fork(array &$b)
 
 function tumblr_post_local(array &$b)
 {
-	if ($b['edit']) {
-		return;
-	}
-
 	if (!DI::userSession()->getLocalUserId() || (DI::userSession()->getLocalUserId() != $b['uid'])) {
 		return;
 	}
 
-	if ($b['private'] || $b['parent']) {
+	if ($b['edit'] || ($b['private'] == Item::PRIVATE) || ($b['gravity'] != Item::GRAVITY_PARENT)) {
 		return;
 	}
 
@@ -530,20 +529,20 @@ function tumblr_send(array &$b)
 	}
 
 	if ($b['gravity'] != Item::GRAVITY_PARENT) {
-		Logger::debug('Got comment', ['item' => $b]);
+		DI::logger()->debug('Got comment', ['item' => $b]);
 
 		$parent = tumblr_get_post_from_uri($b['thr-parent']);
 		if (empty($parent)) {
-			Logger::notice('No tumblr post', ['thr-parent' => $b['thr-parent']]);
+			DI::logger()->notice('No tumblr post', ['thr-parent' => $b['thr-parent']]);
 			return;
 		}
 
-		Logger::debug('Parent found', ['parent' => $parent]);
+		DI::logger()->debug('Parent found', ['parent' => $parent]);
 
 		$page = tumblr_get_page($b['uid']);
 
 		if ($b['gravity'] == Item::GRAVITY_COMMENT) {
-			Logger::notice('Commenting is not supported (yet)');
+			DI::logger()->notice('Commenting is not supported (yet)');
 		} else {
 			if (($b['verb'] == Activity::LIKE) && !$b['deleted']) {
 				$params = ['id' => $parent['id'], 'reblog_key' => $parent['reblog_key']];
@@ -567,16 +566,16 @@ function tumblr_send(array &$b)
 			}
 
 			if ($result->meta->status < 400) {
-				Logger::info('Successfully performed activity', ['verb' => $b['verb'], 'deleted' => $b['deleted'], 'meta' => $result->meta, 'response' => $result->response]);
+				DI::logger()->info('Successfully performed activity', ['verb' => $b['verb'], 'deleted' => $b['deleted'], 'meta' => $result->meta, 'response' => $result->response]);
 				if (!$b['deleted'] && !empty($result->response->id_string)) {
-					Item::update(['extid' => 'tumblr::' . $result->response->id_string], ['id' => $b['id']]);
+					Item::update(['extid' => 'tumblr::' . $result->response->id_string], ['guid' => $b['guid']]);
 				}
 			} else {
-				Logger::notice('Error while performing activity', ['verb' => $b['verb'], 'deleted' => $b['deleted'], 'meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'params' => $params]);
+				DI::logger()->notice('Error while performing activity', ['verb' => $b['verb'], 'deleted' => $b['deleted'], 'meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'params' => $params]);
 			}
 		}
 		return;
-	} elseif ($b['private'] || !strstr($b['postopts'], 'tumblr')) {
+	} elseif (($b['private'] == Item::PRIVATE) || !strstr($b['postopts'], 'tumblr')) {
 		return;
 	}
 
@@ -608,13 +607,22 @@ function tumblr_send_legacy(array $b)
 	$body = BBCode::removeShareInformation($b['body']);
 	$body = Post\Media::removeFromEndOfBody($body);
 
+	if (!empty($b['quote-uri-id'])) {
+		$quote = Post::selectFirstPost(['uri', 'plink'], ['uri-id' => $b['quote-uri-id']]);
+		if (!empty($quote)) {
+			if ((strpos($body, $quote['plink'] ?: $quote['uri']) === false) && (strpos($body, $quote['uri']) === false)) {
+				$body .= "\n[url]" . ($quote['plink'] ?: $quote['uri']) . "[/url]\n";
+			}
+		}
+	}
+
 	if ($photo !== false) {
 		$params['type'] = 'photo';
 		$params['caption'] = BBCode::convertForUriId($b['uri-id'], $body, BBCode::CONNECTORS);
 		$params['data'] = [];
 		foreach ($media as $photo) {
 			if ($photo['type'] == Post\Media::IMAGE) {
-				if (Network::isLocalLink($photo['url']) && ($data = Photo::getResourceData($photo['url']))) {
+				if (DI::baseUrl()->isLocalUrl($photo['url']) && ($data = Photo::getResourceData($photo['url']))) {
 					$photo = Photo::selectFirst([], ["`resource-id` = ? AND `scale` > ?", $data['guid'], 0]);
 					if (!empty($photo)) {
 						$params['data'][] = Photo::getImageDataForPhoto($photo);
@@ -648,7 +656,7 @@ function tumblr_send_legacy(array $b)
 	} else {
 		$params['type']  = 'text';
 		$params['title'] = $title;
-		$params['body']  = BBCode::convertForUriId($b['uri-id'], $b['body'], BBCode::CONNECTORS);
+		$params['body']  = BBCode::convertForUriId($b['uri-id'], $body, BBCode::CONNECTORS);
 	}
 
 	if (isset($params['caption']) && (trim($title) != '')) {
@@ -661,9 +669,9 @@ function tumblr_send_legacy(array $b)
 	$result = tumblr_post($b['uid'], 'blog/' . $page . '/post', $params);
 
 	if ($result->meta->status < 400) {
-		Logger::info('Success (legacy)', ['blog' => $page, 'meta' => $result->meta, 'response' => $result->response]);
+		DI::logger()->info('Success (legacy)', ['blog' => $page, 'meta' => $result->meta, 'response' => $result->response]);
 	} else {
-		Logger::notice('Error posting blog (legacy)', ['blog' => $page, 'meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'params' => $params]);
+		DI::logger()->notice('Error posting blog (legacy)', ['blog' => $page, 'meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'params' => $params]);
 	}
 }
 
@@ -672,14 +680,23 @@ function tumblr_send_npf(array $post): bool
 	$page = tumblr_get_page($post['uid']);
 
 	if (empty($page)) {
-		Logger::notice('Missing page, post will not be send to Tumblr.', ['uid' => $post['uid'], 'page' => $page, 'id' => $post['id']]);
+		DI::logger()->notice('Missing page, post will not be send to Tumblr.', ['uid' => $post['uid'], 'page' => $page, 'id' => $post['id']]);
 		// "true" is returned, since the legacy function will fail as well.
 		return true;
 	}
 
-	$post['body'] = Post\Media::addAttachmentsToBody($post['uri-id'], $post['body']);
+	$post['body'] = Post\Media::addAttachmentsToBody($post['uri-id'], $post['body'], [Post\Media::IMAGE, Post\Media::AUDIO, Post\Media::VIDEO, Post\Media::ACTIVITY]);
 	if (!empty($post['title'])) {
 		$post['body'] = '[h1]' . $post['title'] . "[/h1]\n" . $post['body'];
+	}
+
+	if (!empty($post['quote-uri-id'])) {
+		$quote = Post::selectFirstPost(['uri', 'plink'], ['uri-id' => $post['quote-uri-id']]);
+		if (!empty($quote)) {
+			if ((strpos($post['body'], $quote['plink'] ?: $quote['uri']) === false) && (strpos($post['body'], $quote['uri']) === false)) {
+				$post['body'] .= "\n[url]" . ($quote['plink'] ?: $quote['uri']) . "[/url]\n";
+			}
+		}
 	}
 
 	$params = [
@@ -694,10 +711,10 @@ function tumblr_send_npf(array $post): bool
 	$result = tumblr_post($post['uid'], 'blog/' . $page . '/posts', $params);
 
 	if ($result->meta->status < 400) {
-		Logger::info('Success (NPF)', ['blog' => $page, 'meta' => $result->meta, 'response' => $result->response]);
+		DI::logger()->info('Success (NPF)', ['blog' => $page, 'meta' => $result->meta, 'response' => $result->response]);
 		return true;
 	} else {
-		Logger::notice('Error posting blog (NPF)', ['blog' => $page, 'meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'params' => $params]);
+		DI::logger()->notice('Error posting blog (NPF)', ['blog' => $page, 'meta' => $result->meta, 'response' => $result->response, 'errors' => $result->errors, 'params' => $params]);
 		return false;
 	}
 }
@@ -730,14 +747,26 @@ function tumblr_fetch_tags(int $uid, int $last_poll)
 	}
 
 	foreach (DI::pConfig()->get($uid, 'tumblr', 'tags') ?? [] as $tag) {
+		// Tumblr will return an error for queries on empty tag
+		if (!$tag) {
+			continue;
+		}
+
 		$data = tumblr_get($uid, 'tagged', ['tag' => $tag]);
+
+		if (!is_array($data->response)) {
+			DI::logger()->warning('Unexpected Tumblr response format', ['uid' => $uid, 'url' => 'tagged', 'parameters' => ['tag' => $tag], 'data' => $data]);
+			continue;
+		}
+
 		foreach (array_reverse($data->response) as $post) {
 			$id = tumblr_process_post($post, $uid, Item::PR_TAG, $last_poll);
 			if (!empty($id)) {
-				Logger::debug('Tag post imported', ['tag' => $tag, 'id' => $id]);
+				DI::logger()->debug('Tag post imported', ['tag' => $tag, 'id' => $id]);
 				$post = Post::selectFirst(['uri-id'], ['id' => $id]);
 				$stored = Post\Category::storeFileByURIId($post['uri-id'], $uid, Post\Category::SUBCRIPTION, $tag);
-				Logger::debug('Stored tag subscription for user', ['uri-id' => $post['uri-id'], 'uid' => $uid, 'tag' => $tag, 'stored' => $stored]);
+				DI::logger()->debug('Stored tag subscription for user', ['uri-id' => $post['uri-id'], 'uid' => $uid, 'tag' => $tag, 'stored' => $stored]);
+				Item::incrementInbound(Protocol::TUMBLR);
 			}
 		}
 	}
@@ -761,8 +790,8 @@ function tumblr_fetch_dashboard(int $uid, int $last_poll)
 
 	$dashboard = tumblr_get($uid, 'user/dashboard', $parameters);
 	if ($dashboard->meta->status > 399) {
-		Logger::notice('Error fetching dashboard', ['meta' => $dashboard->meta, 'response' => $dashboard->response, 'errors' => $dashboard->errors]);
-		return [];
+		DI::logger()->notice('Error fetching dashboard', ['meta' => $dashboard->meta, 'response' => $dashboard->response, 'errors' => $dashboard->errors]);
+		return;
 	}
 
 	if (empty($dashboard->response->posts)) {
@@ -774,9 +803,10 @@ function tumblr_fetch_dashboard(int $uid, int $last_poll)
 			$last = $post->id;
 		}
 
-		Logger::debug('Importing post', ['uid' => $uid, 'created' => date(DateTimeFormat::MYSQL, $post->timestamp), 'id' => $post->id_string]);
+		DI::logger()->debug('Importing post', ['uid' => $uid, 'created' => date(DateTimeFormat::MYSQL, $post->timestamp), 'id' => $post->id_string]);
 
 		tumblr_process_post($post, $uid, Item::PR_NONE, $last_poll);
+		Item::incrementInbound(Protocol::TUMBLR);
 
 		DI::pConfig()->set($uid, 'tumblr', 'last_id', $last);
 	}
@@ -831,6 +861,7 @@ function tumblr_get_header(stdClass $post, string $uri, int $uid): array
 	$contact = tumblr_get_contact($post->blog, $uid);
 	$item = [
 		'network'       => Protocol::TUMBLR,
+		'protocol'      => Conversation::PARCEL_CONNECTOR,
 		'uid'           => $uid,
 		'wall'          => false,
 		'uri'           => $uri,
@@ -1047,7 +1078,7 @@ function tumblr_get_type_replacement(array $data, string $plink): string
 			}
 
 		default:
-			Logger::notice('Unknown type', ['type' => $data['type'], 'data' => $data, 'plink' => $plink]);
+			DI::logger()->notice('Unknown type', ['type' => $data['type'], 'data' => $data, 'plink' => $plink]);
 			$body = '';
 	}
 
@@ -1102,9 +1133,9 @@ function tumblr_get_contact(stdClass $blog, int $uid): array
 			$cid = $contact['id'];
 			Contact::update($fields, ['id' => $cid], true);
 		}
-		Logger::debug('Get user contact', ['id' => $cid, 'uid' => $uid, 'update' => $update]);
+		DI::logger()->debug('Get user contact', ['id' => $cid, 'uid' => $uid, 'update' => $update]);
 	} else {
-		Logger::debug('Get public contact', ['id' => $cid, 'uid' => $uid, 'update' => $update]);
+		DI::logger()->debug('Get public contact', ['id' => $cid, 'uid' => $uid, 'update' => $update]);
 	}
 
 	if (!empty($avatar)) {
@@ -1140,15 +1171,16 @@ function tumblr_get_contact_fields(stdClass $blog, int $uid, bool $update): arra
 	];
 
 	if (!$update) {
-		Logger::debug('Got contact fields', ['uid' => $uid, 'url' => $fields['url']]);
+		DI::logger()->debug('Got contact fields', ['uid' => $uid, 'url' => $fields['url']]);
 		return $fields;
 	}
 
 	$info = tumblr_get($uid, 'blog/' . $blog->uuid . '/info');
 	if ($info->meta->status > 399) {
-		Logger::notice('Error fetching blog info', ['meta' => $info->meta, 'response' => $info->response, 'errors' => $info->errors]);
+		DI::logger()->notice('Error fetching blog info', ['meta' => $info->meta, 'response' => $info->response, 'errors' => $info->errors]);
 		return $fields;
 	}
+	Item::incrementInbound(Protocol::TUMBLR);
 
 	$avatar = $info->response->blog->avatar;
 	if (!empty($avatar)) {
@@ -1167,7 +1199,7 @@ function tumblr_get_contact_fields(stdClass $blog, int $uid, bool $update): arra
 
 	$fields['header'] = $info->response->blog->theme->header_image_focused;
 
-	Logger::debug('Got updated contact fields', ['uid' => $uid, 'url' => $fields['url']]);
+	DI::logger()->debug('Got updated contact fields', ['uid' => $uid, 'url' => $fields['url']]);
 	return $fields;
 }
 
@@ -1209,9 +1241,11 @@ function tumblr_get_blogs(int $uid): array
 {
 	$userinfo = tumblr_get($uid, 'user/info');
 	if ($userinfo->meta->status > 399) {
-		Logger::notice('Error fetching blogs', ['meta' => $userinfo->meta, 'response' => $userinfo->response, 'errors' => $userinfo->errors]);
+		DI::logger()->notice('Error fetching blogs', ['meta' => $userinfo->meta, 'response' => $userinfo->response, 'errors' => $userinfo->errors]);
 		return [];
 	}
+
+	Item::incrementInbound(Protocol::TUMBLR);
 
 	$blogs = [];
 	foreach ($userinfo->response->user->blogs as $blog) {
@@ -1263,15 +1297,16 @@ function tumblr_get_contact_by_url(string $url, int $uid): ?array
 		return null;
 	}
 
-	Logger::debug('Update Tumblr blog data', ['url' => $url, 'blog' => $blog, 'uid' => $uid]);
+	DI::logger()->debug('Update Tumblr blog data', ['url' => $url, 'blog' => $blog, 'uid' => $uid]);
 
 	$info = tumblr_get($uid, 'blog/' . $blog . '/info');
 	if ($info->meta->status > 399) {
-		Logger::notice('Error fetching blog info', ['meta' => $info->meta, 'response' => $info->response, 'errors' => $info->errors, 'blog' => $blog, 'uid' => $uid]);
+		DI::logger()->notice('Error fetching blog info', ['meta' => $info->meta, 'response' => $info->response, 'errors' => $info->errors, 'blog' => $blog, 'uid' => $uid]);
 		return null;
-	} else {
-		Logger::debug('Got data', ['blog' => $blog, 'meta' => $info->meta]);
 	}
+
+	DI::logger()->debug('Got data', ['blog' => $blog, 'meta' => $info->meta]);
+	Item::incrementInbound(Protocol::TUMBLR);
 
 	$baseurl = 'https://tumblr.com';
 	$url     = $baseurl . '/' . $info->response->blog->name;
@@ -1337,6 +1372,7 @@ function tumblr_get(int $uid, string $url, array $parameters = []): stdClass
  */
 function tumblr_post(int $uid, string $url, array $parameters): stdClass
 {
+	Item::incrementOutbound(Protocol::TUMBLR);
 	$url = 'https://api.tumblr.com/v2/' . $url;
 
 	$curlResult = DI::httpClient()->post($url, $parameters, ['Authorization' => ['Bearer ' . tumblr_get_token($uid)]]);
@@ -1398,7 +1434,7 @@ function tumblr_get_token(int $uid, string $code = ''): string
 	$refresh_token = DI::pConfig()->get($uid, 'tumblr', 'refresh_token');
 
 	if (empty($code) && !empty($access_token) && ($expires_at > (time()))) {
-		Logger::debug('Got token', ['uid' => $uid, 'expires_at' => date('c', $expires_at)]);
+		DI::logger()->debug('Got token', ['uid' => $uid, 'expires_at' => date('c', $expires_at)]);
 		return $access_token;
 	}
 
@@ -1410,11 +1446,11 @@ function tumblr_get_token(int $uid, string $code = ''): string
 	if (empty($refresh_token) && empty($code)) {
 		$result = tumblr_exchange_token($uid);
 		if (empty($result->refresh_token)) {
-			Logger::info('Invalid result while exchanging token', ['uid' => $uid]);
+			DI::logger()->info('Invalid result while exchanging token', ['uid' => $uid]);
 			return '';
 		}
 		$expires_at = time() + $result->expires_in;
-		Logger::debug('Updated token from OAuth1 to OAuth2', ['uid' => $uid, 'expires_at' => date('c', $expires_at)]);
+		DI::logger()->debug('Updated token from OAuth1 to OAuth2', ['uid' => $uid, 'expires_at' => date('c', $expires_at)]);
 	} else {
 		if (!empty($code)) {
 			$parameters['code']       = $code;
@@ -1426,18 +1462,18 @@ function tumblr_get_token(int $uid, string $code = ''): string
 
 		$curlResult = DI::httpClient()->post('https://api.tumblr.com/v2/oauth2/token', $parameters);
 		if (!$curlResult->isSuccess()) {
-			Logger::info('Error fetching token', ['uid' => $uid, 'code' => $code, 'result' => $curlResult->getBodyString(), 'parameters' => $parameters]);
+			DI::logger()->info('Error fetching token', ['uid' => $uid, 'code' => $code, 'result' => $curlResult->getBodyString(), 'parameters' => $parameters]);
 			return '';
 		}
 
 		$result = json_decode($curlResult->getBodyString());
 		if (empty($result)) {
-			Logger::info('Invalid result when updating token', ['uid' => $uid]);
+			DI::logger()->info('Invalid result when updating token', ['uid' => $uid]);
 			return '';
 		}
 
 		$expires_at = time() + $result->expires_in;
-		Logger::debug('Renewed token', ['uid' => $uid, 'expires_at' => date('c', $expires_at)]);
+		DI::logger()->debug('Renewed token', ['uid' => $uid, 'expires_at' => date('c', $expires_at)]);
 	}
 
 	DI::pConfig()->set($uid, 'tumblr', 'access_token', $result->access_token);
@@ -1479,9 +1515,9 @@ function tumblr_exchange_token(int $uid): stdClass
 		]);
 
 		$response = $client->post('oauth2/exchange', ['auth' => 'oauth']);
-		return json_decode($response->getBodyString()->getContents());
+		return json_decode($response->getBody()->getContents());
 	} catch (RequestException $exception) {
-		Logger::notice('Exchange failed', ['code' => $exception->getCode(), 'message' => $exception->getMessage()]);
+		DI::logger()->notice('Exchange failed', ['code' => $exception->getCode(), 'message' => $exception->getMessage()]);
 		return new stdClass;
 	}
 }
