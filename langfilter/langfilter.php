@@ -1,4 +1,5 @@
 <?php
+
 /*
  * Name: Language Filter
  * Version: 0.1
@@ -36,8 +37,12 @@ function langfilter_addon_settings(array &$data)
 		return;
 	}
 
-	$enabled = DI::pConfig()->get(DI::userSession()->getLocalUserId(), 'langfilter', 'enable',
-		!DI::pConfig()->get(DI::userSession()->getLocalUserId(), 'langfilter', 'disable'));
+	$enabled = DI::pConfig()->get(
+		DI::userSession()->getLocalUserId(),
+		'langfilter',
+		'enable',
+		!DI::pConfig()->get(DI::userSession()->getLocalUserId(), 'langfilter', 'disable'),
+	);
 
 	$languages     = DI::pConfig()->get(DI::userSession()->getLocalUserId(), 'langfilter', 'languages');
 	$minconfidence = DI::pConfig()->get(DI::userSession()->getLocalUserId(), 'langfilter', 'minconfidence', 0) * 100;
@@ -81,10 +86,10 @@ function langfilter_addon_settings_post(array &$b)
 			$minlength = 32;
 		}
 
-		DI::pConfig()->set(DI::userSession()->getLocalUserId(), 'langfilter', 'enable'       , $enable);
-		DI::pConfig()->set(DI::userSession()->getLocalUserId(), 'langfilter', 'languages'    , $languages);
+		DI::pConfig()->set(DI::userSession()->getLocalUserId(), 'langfilter', 'enable', $enable);
+		DI::pConfig()->set(DI::userSession()->getLocalUserId(), 'langfilter', 'languages', $languages);
 		DI::pConfig()->set(DI::userSession()->getLocalUserId(), 'langfilter', 'minconfidence', $minconfidence);
-		DI::pConfig()->set(DI::userSession()->getLocalUserId(), 'langfilter', 'minlength'    , $minlength);
+		DI::pConfig()->set(DI::userSession()->getLocalUserId(), 'langfilter', 'minlength', $minlength);
 	}
 }
 
@@ -99,8 +104,8 @@ function langfilter_addon_settings_post(array &$b)
 
 function langfilter_prepare_body_content_filter(&$hook_data)
 {
-	$logged_user = DI::userSession()->getLocalUserId();
-	if (!$logged_user) {
+	$uid = $hook_data['uid'] ?? DI::userSession()->getLocalUserId();
+	if (!$uid) {
 		return;
 	}
 
@@ -112,22 +117,26 @@ function langfilter_prepare_body_content_filter(&$hook_data)
 	}
 
 	// Don't filter if language filter is disabled
-	if (!DI::pConfig()->get($logged_user, 'langfilter', 'enable',
-		!DI::pConfig()->get($logged_user, 'langfilter', 'disable'))
+	if (!DI::pConfig()->get(
+		$uid,
+		'langfilter',
+		'enable',
+		!DI::pConfig()->get($uid, 'langfilter', 'disable'),
+	)
 	) {
 		return;
 	}
 
 	$naked_body = strip_tags(
 		$hook_data['item']['rendered-html']
-		??''?: // Equivalent of !empty()
-		BBCode::convertForUriId($hook_data['item']['uri-id'], $hook_data['item']['body'], BBCode::ACTIVITYPUB)
+		?? '' // Equivalent of !empty()
+		?:BBCode::convertForUriId($hook_data['item']['uri-id'], $hook_data['item']['body'], BBCode::ACTIVITYPUB),
 	);
 
 	$naked_body = preg_replace('#\s+#', ' ', trim($naked_body));
 
 	// Don't filter if body lenght is below minimum
-	$minlen = DI::pConfig()->get(DI::userSession()->getLocalUserId(), 'langfilter', 'minlength', 32);
+	$minlen = DI::pConfig()->get($uid, 'langfilter', 'minlength', 32);
 	if (!$minlen) {
 		$minlen = 32;
 	}
@@ -136,8 +145,8 @@ function langfilter_prepare_body_content_filter(&$hook_data)
 		return;
 	}
 
-	$read_languages_string = DI::pConfig()->get(DI::userSession()->getLocalUserId(), 'langfilter', 'languages');
-	$minconfidence = DI::pConfig()->get(DI::userSession()->getLocalUserId(), 'langfilter', 'minconfidence');
+	$read_languages_string = DI::pConfig()->get($uid, 'langfilter', 'languages');
+	$minconfidence         = DI::pConfig()->get($uid, 'langfilter', 'minconfidence');
 
 	// Don't filter if no spoken languages are configured
 	if (!$read_languages_string) {
@@ -145,7 +154,7 @@ function langfilter_prepare_body_content_filter(&$hook_data)
 	}
 	$read_languages_array = explode(',', $read_languages_string);
 
-	$iso639 = new Matriphe\ISO639\ISO639;
+	$iso639 = new Matriphe\ISO639\ISO639();
 
 	$confidence = null;
 
@@ -177,7 +186,7 @@ function langfilter_prepare_body_content_filter(&$hook_data)
 			return;
 		}
 
-		$lang = $matches[1];
+		$lang       = $matches[1];
 		$confidence = $matches[2];
 
 		$iso2 = $iso639->code1ByLanguage($lang);

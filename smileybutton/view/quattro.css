@@ -1,0 +1,64 @@
+/* fix positioning if more than one jot tool */
+.jotplugins > div,
+#profile-jot-plugin-wrapper > div {
+	float: left;
+}
+	.jotplugins::after,
+	#profile-jot-plugin-wrapper::after {
+		content: '';
+		display: block;
+		clear: both;
+	}
+#profile-smiley-wrapper {
+	display: block;
+	margin-bottom: -100px;
+}
+
+#smileybutton {
+	display: none;
+	position: absolute;
+	max-width: 770px;
+	z-index: 99;
+	background-color: white;
+}
+.smiley_button {
+	height: 42px;
+}
+.smiley_button > img {
+	height: 18px;
+	width: 18px;
+}
+
+div.smiley-preview img.smiley {
+	max-height: 25px;
+	max-width: 25px;
+	cursor: pointer;
+	vertical-align: baseline;
+}
+
+div.smiley-preview {
+	border: 1px solid #AAAAAA;
+	max-height: 200px;
+	overflow: auto;
+}
+
+div.smiley-preview > span {
+	cursor: pointer;
+	font-size: 24px;
+	padding: 5px;
+	text-align: center;
+	width: 45px;
+	height: 45px;
+	line-height: 45px;
+	float: left;
+	display: block;
+}
+	div.smiley-preview > span:hover,
+	div.smiley-preview > span:focus {
+		background-color: rgba(0,0,0,.1);
+	}
+	div.smiley-preview::after {
+		content: '';
+		display: block;
+		clear: both;
+	}
